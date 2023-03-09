@@ -11,6 +11,7 @@ use hal::gpio::*;
 use hal::prelude::*;
 use hal::pwm::*;
 use hal::stm32;
+use hal::syscfg::SysCfgExt;
 use hal::timer::*;
 
 pub struct PWM {
@@ -27,7 +28,7 @@ impl PWM {
         ch3: Pwm<stm32::TIM1, C3, ComplementaryEnabled, ActiveHigh, ActiveHigh>,
     ) -> Self {
         let h = ch1.get_max_duty();
-        let m = h / 2;
+        let m = h / 4;
         let l = 0;
         let steps = [
             (h, l, m),
@@ -58,7 +59,7 @@ mod app {
         frame: usize,
         pwm: PWM,
         exti: stm32::EXTI,
-        // led: PC6<Output<PushPull>>,
+        button: gpioc::PC10<Input<PullDown>>,
         timer: CountDownTimer<stm32::TIM4>,
     }
 
@@ -66,12 +67,18 @@ mod app {
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
         defmt::info!("init");
 
-        let exti = ctx.device.EXTI;
+        let mut exti = ctx.device.EXTI;
         let mut rcc = ctx.device.RCC.constrain();
+        let mut syscfg = ctx.device.SYSCFG.constrain();
 
         let port_a = ctx.device.GPIOA.split(&mut rcc);
         let port_b = ctx.device.GPIOB.split(&mut rcc);
         let port_c = ctx.device.GPIOC.split(&mut rcc);
+
+        let mut button = port_c.pc10.into_pull_down_input();
+        button.make_interrupt_source(&mut syscfg);
+        button.trigger_on_edge(&mut exti, SignalEdge::Rising);
+        button.enable_interrupt(&mut exti);
 
         let tim = ctx
             .device
@@ -84,9 +91,9 @@ mod app {
                 ),
                 &mut rcc,
             )
-            .prescaler(39)
+            .prescaler(24)
             .period(8_500 - 1)
-            .with_deadtime(500.ns())
+            .with_deadtime(1500.ns())
             .center_aligned();
 
         let (_, (t1c1, t1c2, t1c3)) = tim.finalize();
@@ -106,7 +113,7 @@ mod app {
         let pwm = PWM::new(ch1, ch2, ch3);
 
         let timer = Timer::new(ctx.device.TIM4, &rcc.clocks);
-        let mut timer = timer.start_count_down(800.hz());
+        let mut timer = timer.start_count_down(50.hz());
         timer.listen(Event::TimeOut);
 
         defmt::info!("init completed");
@@ -114,6 +121,7 @@ mod app {
         (
             Shared {},
             Local {
+                button,
                 exti,
                 timer,
                 pwm,
@@ -130,14 +138,16 @@ mod app {
         pwm.ch1.set_duty(ch1);
         pwm.ch2.set_duty(ch2);
         pwm.ch3.set_duty(ch3);
+
         *frame += 1;
         timer.clear_interrupt(Event::TimeOut);
     }
 
-    #[task(binds = EXTI15_10, local = [exti])]
+    #[task(binds = EXTI15_10, local = [exti, button])]
     fn button_click(ctx: button_click::Context) {
         defmt::info!("click");
         ctx.local.exti.unpend(hal::exti::Event::GPIO10);
+        ctx.local.button.clear_interrupt_pending_bit();
     }
 
     #[idle]
