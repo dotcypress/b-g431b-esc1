@@ -5,6 +5,8 @@ extern crate panic_halt;
 extern crate rtic;
 extern crate stm32g4xx_hal as hal;
 
+mod pwm;
+
 use defmt_rtt as _;
 
 use hal::gpio::*;
@@ -13,39 +15,7 @@ use hal::pwm::*;
 use hal::stm32;
 use hal::syscfg::SysCfgExt;
 use hal::timer::*;
-
-pub struct PWM {
-    ch1: Pwm<stm32::TIM1, C1, ComplementaryEnabled, ActiveHigh, ActiveHigh>,
-    ch2: Pwm<stm32::TIM1, C2, ComplementaryEnabled, ActiveHigh, ActiveHigh>,
-    ch3: Pwm<stm32::TIM1, C3, ComplementaryEnabled, ActiveHigh, ActiveHigh>,
-    steps: [(u16, u16, u16); 6],
-}
-
-impl PWM {
-    pub fn new(
-        ch1: Pwm<stm32::TIM1, C1, ComplementaryEnabled, ActiveHigh, ActiveHigh>,
-        ch2: Pwm<stm32::TIM1, C2, ComplementaryEnabled, ActiveHigh, ActiveHigh>,
-        ch3: Pwm<stm32::TIM1, C3, ComplementaryEnabled, ActiveHigh, ActiveHigh>,
-    ) -> Self {
-        let h = ch1.get_max_duty();
-        let m = h / 4;
-        let l = 0;
-        let steps = [
-            (h, l, m),
-            (h, m, l),
-            (m, h, l),
-            (l, h, m),
-            (l, m, h),
-            (m, l, h),
-        ];
-        Self {
-            ch1,
-            ch2,
-            ch3,
-            steps,
-        }
-    }
-}
+use pwm::*;
 
 #[rtic::app(device = hal::stm32, peripherals = true)]
 mod app {
@@ -91,29 +61,20 @@ mod app {
                 ),
                 &mut rcc,
             )
-            .prescaler(24)
+            .prescaler(1)
             .period(8_500 - 1)
             .with_deadtime(1500.ns())
             .center_aligned();
 
         let (_, (t1c1, t1c2, t1c3)) = tim.finalize();
 
-        let mut ch1 = t1c1.into_complementary(port_c.pc13.into_alternate());
-        let mut ch2 = t1c2.into_complementary(port_a.pa12.into_alternate());
-        let mut ch3 = t1c3.into_complementary(port_b.pb15.into_alternate());
-
-        ch1.set_duty(0);
-        ch2.set_duty(0);
-        ch3.set_duty(0);
-
-        ch1.enable();
-        ch2.enable();
-        ch3.enable();
-
-        let pwm = PWM::new(ch1, ch2, ch3);
+        let u = t1c1.into_complementary(port_c.pc13.into_alternate());
+        let v = t1c2.into_complementary(port_a.pa12.into_alternate());
+        let w = t1c3.into_complementary(port_b.pb15.into_alternate());
+        let pwm = PWM::new(u, v, w);
 
         let timer = Timer::new(ctx.device.TIM4, &rcc.clocks);
-        let mut timer = timer.start_count_down(50.hz());
+        let mut timer = timer.start_count_down(150.hz());
         timer.listen(Event::TimeOut);
 
         defmt::info!("init completed");
@@ -134,11 +95,7 @@ mod app {
     #[task(binds = TIM4, local = [timer, frame, pwm])]
     fn timer_tick(ctx: timer_tick::Context) {
         let timer_tick::LocalResources { timer, frame, pwm } = ctx.local;
-        let (ch1, ch2, ch3) = pwm.steps[*frame % 6];
-        pwm.ch1.set_duty(ch1);
-        pwm.ch2.set_duty(ch2);
-        pwm.ch3.set_duty(ch3);
-
+        pwm.set_step(*frame);
         *frame += 1;
         timer.clear_interrupt(Event::TimeOut);
     }
